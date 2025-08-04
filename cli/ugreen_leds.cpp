@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <numeric>
+#include <algorithm>
 
 #define I2C_DEV_PATH  "/sys/class/i2c-dev/"
 
@@ -32,11 +34,8 @@ static int compute_checksum(const std::vector<uint8_t>& data, int size) {
     if (size < 2 || size > (int)data.size()) 
         return 0;
 
-    int sum = 0;
-    for (int i = 0; i < size; ++i)
-        sum += (int)data[i];
-
-    return sum;
+    return std::accumulate(data.begin(), data.begin() + size, 0,
+                          [](int sum, uint8_t byte) { return sum + static_cast<int>(byte); });
 }
 
 static bool verify_checksum(const std::vector<uint8_t>& data) {

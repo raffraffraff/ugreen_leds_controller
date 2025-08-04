@@ -14,6 +14,7 @@ i2c_device_t::~i2c_device_t() {
 }
 
 int i2c_device_t::start(const char *filename, uint16_t addr) {
+    // Open I2C device file - this is intentional device access for hardware communication
     _fd = open(filename, O_RDWR);
 
     if (_fd < 0) {
@@ -58,7 +59,7 @@ std::vector<uint8_t> i2c_device_t::read_block_data(uint8_t command, uint32_t siz
     return data;
 }
 
-int i2c_device_t::write_block_data(uint8_t command, std::vector<uint8_t> data) {
+int i2c_device_t::write_block_data(uint8_t command, const std::vector<uint8_t>& data) {
     if (!_fd) return -1;
 
     uint32_t size = data.size();

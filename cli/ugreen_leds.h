@@ -44,6 +44,7 @@ public:
     };
 
 public:
+    ugreen_leds_t() = default;
     int start();
 
     led_data_t get_status(led_type_t id);
