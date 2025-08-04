@@ -96,8 +96,11 @@ static int ugreen_led_get_state(
         sum += buf[i];
     }
 
-    // check the checksum
-    if (sum == 0 || (sum != (((u16)buf[9] << 8) | buf[10]))) {
+    // check the checksum - verify received checksum matches calculated
+    u16 received_checksum = ((u16)buf[9] << 8) | buf[10];
+    if (sum != received_checksum) {
+        pr_debug("%s: checksum mismatch: calculated 0x%04x, received 0x%04x", 
+                __func__, sum, received_checksum);
         return -1;
     }
 
@@ -138,7 +141,6 @@ static int ugreen_led_change_state_robust(
     u8 param3,
     u8 param4
 ) {
-    int rc = 0;
     for (int i = 0; i < UGREEN_LED_CHANGE_STATE_RETRY_COUNT; ++i) {
 
         if (i == 0) usleep_range(500, 1500);
@@ -146,7 +148,7 @@ static int ugreen_led_change_state_robust(
 
         if (i > 0) pr_debug("retrying %d", i);
 
-        rc = ugreen_led_change_state(client, led_id, command, param1, param2, param3, param4);
+        int rc = ugreen_led_change_state(client, led_id, command, param1, param2, param3, param4);
         if (rc == 0) {
             usleep_range(1500, 2500);
             if (ugreen_led_get_last_command_status(client)) {
@@ -163,13 +165,12 @@ static int ugreen_led_get_state_robust(
         u8 led_id, 
         struct ugreen_led_state *state
 ) {
-    int rc = 0;
     for (int i = 0; i < UGREEN_LED_CHANGE_STATE_RETRY_COUNT; ++i) {
 
         if (i == 0) usleep_range(500, 1500);
         else msleep(30);
 
-        rc = ugreen_led_get_state(client, led_id, state);
+        int rc = ugreen_led_get_state(client, led_id, state);
         if (rc == 0) return 0;
     }
 
@@ -218,7 +219,8 @@ static void ugreen_led_set_color_unlock(struct ugreen_led_array *priv, u8 led_id
     struct ugreen_led_state *state = priv->state + led_id;
 
     if (!r && !g && !b) {
-        return ugreen_led_turn_on_or_off_unlock(priv, led_id, false);
+        ugreen_led_turn_on_or_off_unlock(priv, led_id, false);
+        return;
     }
 
     if (state->r != r || state->g != g || state->b != b) {
@@ -235,25 +237,24 @@ static void ugreen_led_set_color_unlock(struct ugreen_led_array *priv, u8 led_id
 
 static void ugreen_led_set_blink_or_breath_unlock(struct ugreen_led_array *priv, u8 led_id, u16 t_on, u16 t_cycle, bool is_blink) {
 
-    int rc;
     struct ugreen_led_state *state = priv->state + led_id;
     u8 led_status = is_blink ? UGREEN_LED_STATE_BLINK : UGREEN_LED_STATE_BREATH;
 
     if (state->t_on == t_on && state->t_cycle == t_cycle && state->status == led_status) {
-        rc = 0;
-    } else {
-        rc = ugreen_led_change_state_robust(priv->client, led_id, is_blink ? 0x04 : 0x05, 
-            (u8)(t_cycle >> 8), (u8)(t_cycle & 0xff), 
-            (u8)(t_on >> 8), (u8)(t_on & 0xff)
-        );
+        return; // No change needed
+    }
+    
+    int rc = ugreen_led_change_state_robust(priv->client, led_id, is_blink ? 0x04 : 0x05, 
+        (u8)(t_cycle >> 8), (u8)(t_cycle & 0xff), 
+        (u8)(t_on >> 8), (u8)(t_on & 0xff)
+    );
 
-        if (rc == 0) {
-            state->t_on = t_on;
-            state->t_cycle = t_cycle;
-            state->status = led_status;
-        } else if (verbose) {
-            pr_err("failed to set %s of %d to %d %d", is_blink ? "blink" : "breath", led_id, t_on, t_cycle);
-        }
+    if (rc == 0) {
+        state->t_on = t_on;
+        state->t_cycle = t_cycle;
+        state->status = led_status;
+    } else if (verbose) {
+        pr_err("failed to set %s of %d to %d %d", is_blink ? "blink" : "breath", led_id, t_on, t_cycle);
     }
 }
 
@@ -331,7 +332,8 @@ static ssize_t color_store(struct device *dev,
         return -EINVAL;
     }
 
-    if (++nrchars < size) {
+    // Validate that we consumed the entire buffer (minus trailing newline)
+    if (nrchars != size && (nrchars + 1 != size || buf[nrchars] != '\n')) {
         return -EINVAL;
     }
 
@@ -348,7 +350,7 @@ static ssize_t color_show(struct device *dev, struct device_attribute *attr, cha
 
     struct led_classdev *cdev = dev_get_drvdata(dev);
     struct ugreen_led_state *state = lcdev_to_ugreen_led_state(cdev);
-    return sprintf(buf, "%d %d %d\n", state->r, state->g, state->b);
+    return scnprintf(buf, PAGE_SIZE, "%d %d %d\n", state->r, state->g, state->b);
 }
 
 static DEVICE_ATTR_RW(color);
@@ -371,10 +373,11 @@ static ssize_t blink_type_store(struct device *dev,
         blink_type = UGREEN_LED_STATE_BREATH;
     } else if(strcmp(buf, "none\n") == 0) {
         blink_type = UGREEN_LED_STATE_ON;
-        nrchars = size;
+        nrchars = 4; // length of "none"
     } else return -EINVAL;
 
-    if (++nrchars < size) {
+    // Validate that we consumed the entire buffer (minus trailing newline)
+    if (nrchars != size && (nrchars + 1 != size || buf[nrchars] != '\n')) {
         return -EINVAL;
     }
 
@@ -408,18 +411,18 @@ static ssize_t blink_type_show(struct device *dev, struct device_attribute *attr
     mutex_unlock(&state->priv->mutex);
 
     if (status == UGREEN_LED_STATE_BLINK) {
-        size += sprintf(buf, "none [blink] breath\n");
+        size += scnprintf(buf + size, PAGE_SIZE - size, "none [blink] breath\n");
     } else if (status == UGREEN_LED_STATE_BREATH) {
-        size += sprintf(buf, "none blink [breath]\n");
+        size += scnprintf(buf + size, PAGE_SIZE - size, "none blink [breath]\n");
     } else {
-        size += sprintf(buf, "[none] blink breath\n");
+        size += scnprintf(buf + size, PAGE_SIZE - size, "[none] blink breath\n");
     }
 
     if (status == UGREEN_LED_STATE_BLINK || status == UGREEN_LED_STATE_BREATH) {
-        size += sprintf(buf + size, "delay_on: %d, delay_off: %d\n", delay_on, delay_off);
+        size += scnprintf(buf + size, PAGE_SIZE - size, "delay_on: %d, delay_off: %d\n", delay_on, delay_off);
     }
 
-    size += sprintf(buf + size, "\nUsage: write \"blink <delay_on> <delay_off>\" to change the state.\n");
+    size += scnprintf(buf + size, PAGE_SIZE - size, "\nUsage: write \"blink <delay_on> <delay_off>\" to change the state.\n");
 
     return size;
 }
@@ -429,18 +432,18 @@ static DEVICE_ATTR_RW(blink_type);
 static ssize_t status_show(struct device *dev, struct device_attribute *attr, char *buf) {
 
     struct led_classdev *cdev = dev_get_drvdata(dev);
-    struct ugreen_led_state state = *lcdev_to_ugreen_led_state(cdev);
+    struct ugreen_led_state *state = lcdev_to_ugreen_led_state(cdev);
 
-    mutex_lock(&state.priv->mutex);
-    int status = state.status;
+    mutex_lock(&state->priv->mutex);
+    int status = state->status;
     if (status >= ARRAY_SIZE(ugreen_led_state_name)) {
         status = UGREEN_LED_STATE_INVALID;
     }
-    ssize_t size = sprintf(buf, "%s %d %d %d %d %d %d\n", 
-            ugreen_led_state_name[state.status], (int)state.brightness, 
-            (int)state.r, (int)state.g, (int)state.b,
-            (int)state.t_on, (int)(state.t_cycle - state.t_on));
-    mutex_unlock(&state.priv->mutex);
+    ssize_t size = scnprintf(buf, PAGE_SIZE, "%s %d %d %d %d %d %d\n", 
+            ugreen_led_state_name[status], (int)state->brightness, 
+            (int)state->r, (int)state->g, (int)state->b,
+            (int)state->t_on, (int)(state->t_cycle - state->t_on));
+    mutex_unlock(&state->priv->mutex);
 
     return size;
 }
@@ -513,7 +516,7 @@ static int ugreen_led_probe(struct i2c_client *client) {
             state->cdev.name = led_name[i];
         else state->cdev.name = "unknown";
 
-        state->cdev.brightness = state->cdev.brightness;
+        state->cdev.brightness = state->brightness;
         state->cdev.max_brightness = 0xff;
         state->cdev.brightness_set_blocking = ugreen_led_set_brightness_blocking;
         state->cdev.brightness_get = ugreen_led_get_brightness;
@@ -522,11 +525,22 @@ static int ugreen_led_probe(struct i2c_client *client) {
 
         if (i == 1) {
             state->cdev.default_trigger = "netdev";
-        } else if (i >= 2) {
+        } else        if (i >= 2) {
             state->cdev.default_trigger = "oneshot";
         }
 
-        led_classdev_register(&client->dev, &state->cdev);
+        int ret = led_classdev_register(&client->dev, &state->cdev);
+        if (ret) {
+            pr_err("failed to register LED class device for %s: %d", state->cdev.name, ret);
+            // Unregister previously registered LEDs on failure
+            mutex_unlock(&priv->mutex);
+            for (int j = 0; j < i; j++) {
+                if (priv->state[j].status != UGREEN_LED_STATE_INVALID) {
+                    led_classdev_unregister(&priv->state[j].cdev);
+                }
+            }
+            return ret;
+        }
     }
 
     mutex_unlock(&priv->mutex);
@@ -562,7 +576,7 @@ ugreen_led_remove(struct i2c_client *client) {
 }
 
 static const struct i2c_device_id ugreen_led_id[] = {
-        { UGREEN_LED_SLAVE_NAME, 0 },
+        { .name = UGREEN_LED_SLAVE_NAME, .driver_data = 0 },
         { }
 };
 
@@ -585,8 +599,13 @@ static struct i2c_driver ugreen_led_driver = {
 
 
 static int __init ugreen_led_init(void) {
-    pr_info ("initializing");
-    i2c_add_driver(&ugreen_led_driver);
+    int ret;
+    pr_info("initializing");
+    ret = i2c_add_driver(&ugreen_led_driver);
+    if (ret) {
+        pr_err("failed to add i2c driver: %d", ret);
+        return ret;
+    }
     return 0;
 }
 
