@@ -1,6 +1,6 @@
 
 CC = g++
-CFLAGS = -I. -O2 -Wall -static
+CFLAGS = -I. -O2 -Wall
 DEPS = i2c.h ugreen_leds.h
 OBJ = i2c.o ugreen_leds.o 
 
